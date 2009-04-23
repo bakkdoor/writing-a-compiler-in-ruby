@@ -41,6 +41,23 @@ class Compiler
   end
 
 
+  # Outputs nice compiler error messages, similar to
+  # the parser (ParserBase#error).
+  def error(error_message, current_scope = nil, current_exp = nil)
+    raise "Compiler error: #{error_message}\n
+           current scope: #{current_scope.inspect}\n
+           current expression: #{current_exp}\n"
+  end
+
+  # Allocate an integer value to a symbol. We'll "cheat" for now and just
+  # use the "host" system. The symbol table needs to eventually get
+  # reflected in the compiled program -- you need to be able to retrieve the
+  # name etc.. We also need to either create a "real" object for each of them
+  # *or* use a typetag like MRI
+  def intern(sym)
+    sym.intern.to_i
+  end
+
   # Returns an argument with its type identifier.
   #
   # If an Array is given, we have a subexpression, which needs to be compiled first.
@@ -50,7 +67,11 @@ class Compiler
   def get_arg(scope, a)
     return compile_exp(scope, a) if a.is_a?(Array)
     return [:int, a] if (a.is_a?(Fixnum))
-    return scope.get_arg(a) if (a.is_a?(Symbol))
+    if (a.is_a?(Symbol))
+      name = a.to_s
+      return [:int,intern(name.rest)] if name[0] == ?: 
+      return scope.get_arg(a) 
+    end
 
     lab = @string_constants[a]
     if !lab
@@ -92,7 +113,12 @@ class Compiler
     if scope.is_a?(ClassScope) # Ugly. Create a default "register_function" or something. Have it return the global name
       f = Function.new([:self]+args, body) # "self" is "faked" as an argument to class methods.
       @e.comment("method #{name}")
-      fname = "__method_#{scope.name}_#{name}"
+
+      # Need to clean up the name to be able to use it in the assembler.
+      # Strictly speaking we don't *need* to use a sensible name at all,
+      # but it makes me a lot happier when debugging the asm.
+      cleaned = name.to_s.gsub("?","__Q") # FIXME: Needs to do more.
+      fname = "__method_#{scope.name}_#{cleaned}"
       scope.set_vtable_entry(name, fname, f)
       @e.load_address(fname)
       @e.with_register do |reg|
@@ -127,10 +153,10 @@ class Compiler
     l_else_arm = @e.get_local
     l_end_if_arm = @e.get_local
     @e.jmp_on_false(l_else_arm)
-    compile_exp(scope, if_arm)
+    compile_eval_arg(scope, if_arm)
     @e.jmp(l_end_if_arm) if else_arm
     @e.local(l_else_arm)
-    compile_exp(scope, else_arm) if else_arm
+    compile_eval_arg(scope, else_arm) if else_arm
     @e.local(l_end_if_arm) if else_arm
     return [:subexpr]
   end
@@ -144,8 +170,8 @@ class Compiler
   end
 
   def compile_eval_arg(scope, arg)
-    atype, aparam = get_arg(scope, arg)
-    return @e.load(atype,aparam)
+    args = get_arg(scope,arg)
+    return @e.load(args[0],args[1])
   end
 
 
@@ -158,13 +184,15 @@ class Compiler
     end
 
     source = compile_eval_arg(scope, right)
-    atype, aparam = nil, nil
+    atype = nil
+    aparam = nil
     @e.save_register(source) do
       atype, aparam = get_arg(scope, left)
     end
 
     if !(@e.save(atype,source,aparam))
-      raise "Expected an argument on left hand side of assignment - got #{atype.to_s}, (left: #{left.inspect}, right: #{right.inspect})"
+      err_msg = "Expected an argument on left hand side of assignment - got #{atype.to_s}, (left: #{left.inspect}, right: #{right.inspect})"
+      error(err_msg, scope, [:assign, left, right]) # pass current expression as well
     end
     return [:subexpr]
   end
@@ -207,7 +235,12 @@ class Compiler
       @e.with_register do |reg|
         @e.load_indirect(ret, reg)
         off = @vtableoffsets.get_offset(method)
-        raise "No offset for #{method}, and we don't yet implement send" if !off
+
+        if !off
+          err_msg = "No offset for #{method}, and we don't yet implement send"
+          error(err_msg, scope, [:callm, ob, method, args])
+        end
+
         @e.movl("#{off*Emitter::PTR_SIZE}(%#{reg.to_s})", @e.result_value)
         @e.call(@e.result_value)
       end
@@ -272,11 +305,15 @@ class Compiler
   # that belong to the class.
   def compile_class(scope, name, *exps)
     @e.comment("=== class #{name} ===")
-    # FIXME: *BEFORE* this we need to visit all :call/:callm nodes and decide on a vtable size. If 
+    # FIXME: *BEFORE* this we need to visit all :call/:callm nodes and decide on a vtable size. If
     # not we are unable to determine the correct #klass_size (see below).
+    STDERR.puts "INFO: Max vtable offset is #{@vtableoffsets.max}" # This illustrates the problem above - it should remain the same
+
     cscope = ClassScope.new(scope, name, @vtableoffsets)
     # FIXME: (If this class has a superclass, copy the vtable from the superclass as a starting point)
     # FIXME: Fill in all unused vtable slots with __method_missing
+    # FIXME: Need to generate "thunks" for __method_missing that knows the name of the slot they are in, and
+    #        then jump into __method_missing.
     exps.each do |l2|
       l2.each do |e|
         if e.is_a?(Array) && e[0] == :defun

@@ -66,15 +66,23 @@ class Parser < ParserBase
     ret
   end
 
-  # if ::= "if" ws* condition defexp* "end"
+  # if ::= "if" ws* condition "then"? defexp* "end"
   def parse_if
     expect("if") or return
     ws
     cond = parse_condition or expected("condition for 'if' block")
     nolfws; expect(";")
+    nolfws; expect("then"); ws;
     exps = zero_or_more(:defexp)
+    ws
+    if expect("else")
+      ws
+      elseexps = zero_or_more(:defexp)
+    end
     expect("end") or expected("expression or 'end' for open 'if'")
-    return [:if, cond, [:do]+exps]
+    ret = [:if, cond, [:do]+exps]
+    ret << [:do]+elseexps if elseexps
+    return  ret
   end
 
   # when ::= "when" ws* condition (nolfws* ":")? ws* defexp*
@@ -216,8 +224,8 @@ class Parser < ParserBase
     end
     args = parse_args || []
     expect(";")
-    vars, exps = parse_block_exps
-    exps = [:let,vars] + exps
+    ret = parse_block_exps
+    exps = [:let,ret[0]] + ret[1]
     expect("end") or expected("expression or 'end' for open def")
     return [:defun, name, args, exps]
   end
@@ -259,7 +267,7 @@ class Parser < ParserBase
     paths = rel_include_paths(q)
     f = nil
     paths.detect { |path| f = File.open(path) rescue nil }
-    raise "Unable to load '#{q}'" if !f
+    error("Unable to load '#{q}'") if !f
     s = Scanner.new(f)
     @@requires[q] = Parser.new(s,@opts).parse(false)
   end
@@ -302,7 +310,7 @@ class Parser < ParserBase
     res << self.require("lib/core/core.rb") if require_core and !@opts[:norequire]
     res += zero_or_more(:exp)
     ws
-    raise "Expected EOF" if scanner.peek
+    error("Expected EOF") if scanner.peek
     return res
   end
 end
