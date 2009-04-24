@@ -22,13 +22,15 @@ class Hash
     # empty entries array
     @entries = Array.new
 
-    # we need an even amount of keys & values to work correctly
-    if(key_value_pair_array.length.mod(2) != 0)
-      key_value_pair_array.in_groups_of(2) do |key, value|
-        @entries.add(HashEntry.new(key, value))
+    if key_value_pair_array.length > 1
+      # we need an even amount of keys & values to work correctly
+      if(key_value_pair_array.length.modulo(2) != 0)
+        key_value_pair_array.in_groups_of(2) do |key, value|
+          @entries.add(HashEntry.new(key, value))
+        end
+      else
+        raise "HashError: Amount of keys and values not matching!"
       end
-    else
-      raise "HashError: Amount of keys and values not matching!"
     end
   end
 
@@ -75,7 +77,7 @@ class Hash
   def get_entry(key)
     @entries.each do |item|
       if item.key == key
-        return item.value
+        return item
       end
     end
 
